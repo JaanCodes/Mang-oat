@@ -336,83 +336,66 @@ def parse_embeddings(df_column):
     Toma una columna de un DataFrame (pasada por ColumnTransformer) que contiene
     strings de embeddings separados por comas y los convierte en una matriz 2D de NumPy.
     """
-    # df_column.iloc[:, 0] selecciona la primera (y única) columna como una Serie
-    embeddings_series = df_column.iloc[:, 0]
-    
-    # Manejar posibles valores nulos o vacíos
-    embeddings_series = embeddings_series.fillna('') 
-    
-    # Procesa cada string
+    embeddings_series = df_column.iloc[:, 0].fillna('')
+
     embeddings_list = embeddings_series.apply(
         lambda x: [float(v) for v in x.split(',') if v.strip()] if x else []
     )
-    
-    # Encontrar la longitud máxima esperada (basado en un valor no nulo)
+
     try:
-        # Intenta inferir la longitud de un embedding válido
         target_dim = len(next(item for item in embeddings_list if item))
     except StopIteration:
-        # Si no hay embeddings, usa una dimensión por defecto (ej. 256)
-        target_dim = 256 
-        print("Advertencia: No se encontraron embeddings válidos, usando default.")
+        target_dim = 256
+        print("Advertencia: No se encontraron embeddings válidos, usando dimensión 256 por defecto.")
 
-    # Asegura que todos los vectores tengan la misma longitud, rellenando con 0 si es necesario
     def pad_or_truncate(e_list, dim):
         if len(e_list) > dim:
             return e_list[:dim]
-        elif len(e_list) < dim:
+        if len(e_list) < dim:
             return e_list + [0.0] * (dim - len(e_list))
         return e_list
 
     processed_list = [pad_or_truncate(e, target_dim) for e in embeddings_list]
-    
-    # Devuelve la matriz NumPy
     return np.array(processed_list)
 
 
-# --- NUEVO: Función para crear features avanzadas con embeddings ---
 def create_embedding_features(df, embedding_col='image_embedding'):
+    """Crea features basadas en embeddings y temporada.
+
+    - Clustering por temporada (KMeans)
+    - Similitud con el centroide de la temporada
+    - Distancia media a otros productos de la misma temporada
+    - Similitud media con temporadas más cercanas
     """
-    Crea features basadas en embeddings:
-    - Clustering por temporada
-    - Similitud con centros de temporada
-    - Estadísticas de distancias
-    """
-    print("Procesando embeddings para crear features avanzadas...")
-    
-    # Parsear embeddings
+    print("Procesando embeddings para crear features estacionales...")
+
     df = df.copy()
     df['embedding_parsed'] = df[embedding_col].fillna('').apply(
         lambda x: np.array([float(v) for v in x.split(',') if v.strip()]) if x else np.zeros(256)
     )
-    
-    # Normalizar longitud de embeddings
+
     max_len = max(len(e) for e in df['embedding_parsed'])
     df['embedding_parsed'] = df['embedding_parsed'].apply(
         lambda x: np.pad(x, (0, max_len - len(x)), 'constant') if len(x) < max_len else x[:max_len]
     )
-    
-    # Convertir a matriz
+
     embeddings_matrix = np.stack(df['embedding_parsed'].values)
-    
-    # 1. Clustering de embeddings por temporada usando KMeans
+
     print("Aplicando clustering por temporada...")
-    season_clusters = {}
     df['embedding_cluster'] = -1
-    
+    season_clusters = {}
+
     for season in df['id_season'].unique():
         if pd.notna(season):
             season_mask = df['id_season'] == season
             season_embeddings = embeddings_matrix[season_mask]
-            
-            if len(season_embeddings) > 5:  # Solo si hay suficientes muestras
+            if len(season_embeddings) > 5:
                 n_clusters = min(5, len(season_embeddings) // 10 + 1)
                 kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
                 clusters = kmeans.fit_predict(season_embeddings)
                 df.loc[season_mask, 'embedding_cluster'] = clusters
                 season_clusters[season] = kmeans.cluster_centers_
-    
-    # 2. Calcular centroide por temporada
+
     print("Calculando centroides por temporada...")
     season_centroids = {}
     for season in df['id_season'].unique():
@@ -421,17 +404,15 @@ def create_embedding_features(df, embedding_col='image_embedding'):
             season_embeddings = embeddings_matrix[season_mask]
             if len(season_embeddings) > 0:
                 season_centroids[season] = season_embeddings.mean(axis=0)
-    
-    # 3. Calcular similitud con centroide de su temporada
+
     df['similarity_to_season_center'] = 0.0
     for season, centroid in season_centroids.items():
         season_mask = df['id_season'] == season
         season_embeddings = embeddings_matrix[season_mask]
         if len(season_embeddings) > 0:
-            similarities = cosine_similarity(season_embeddings, centroid.reshape(1, -1)).flatten()
-            df.loc[season_mask, 'similarity_to_season_center'] = similarities
-    
-    # 4. Distancia media a otros productos de la misma temporada
+            sims = cosine_similarity(season_embeddings, centroid.reshape(1, -1)).flatten()
+            df.loc[season_mask, 'similarity_to_season_center'] = sims
+
     print("Calculando distancias intra-temporada...")
     df['avg_distance_within_season'] = 0.0
     for season in df['id_season'].unique():
@@ -440,167 +421,189 @@ def create_embedding_features(df, embedding_col='image_embedding'):
             season_embeddings = embeddings_matrix[season_mask]
             if len(season_embeddings) > 1:
                 distances = cdist(season_embeddings, season_embeddings, metric='euclidean')
-                avg_distances = distances.sum(axis=1) / (len(season_embeddings) - 1)
-                df.loc[season_mask, 'avg_distance_within_season'] = avg_distances
-    
-    # 5. Similitud con las 3 temporadas más cercanas
+                avg_dists = distances.sum(axis=1) / (len(season_embeddings) - 1)
+                df.loc[season_mask, 'avg_distance_within_season'] = avg_dists
+
     print("Calculando similitudes entre temporadas...")
     df['similarity_to_nearest_seasons'] = 0.0
     if len(season_centroids) > 1:
         centroid_matrix = np.array(list(season_centroids.values()))
-        season_ids = list(season_centroids.keys())
-        
         for idx, (season, centroid) in enumerate(season_centroids.items()):
             season_mask = df['id_season'] == season
-            # Calcular similitud con otros centroides
             other_centroids = np.delete(centroid_matrix, idx, axis=0)
-            similarities = cosine_similarity(centroid.reshape(1, -1), other_centroids).flatten()
-            # Promedio de las 3 más similares
-            top_similarities = np.sort(similarities)[-3:] if len(similarities) >= 3 else similarities
-            df.loc[season_mask, 'similarity_to_nearest_seasons'] = top_similarities.mean()
-    
-    # Eliminar columna temporal
+            sims = cosine_similarity(centroid.reshape(1, -1), other_centroids).flatten()
+            top_sims = np.sort(sims)[-3:] if len(sims) >= 3 else sims
+            df.loc[season_mask, 'similarity_to_nearest_seasons'] = top_sims.mean()
+
     df = df.drop('embedding_parsed', axis=1)
-    
-    print("Features de embeddings creadas exitosamente!")
+    print("Features de embeddings estacionales creadas!")
     return df
 
-# --- PASO 2: Definir las listas de features ---
-# Primero creamos las features de embeddings avanzadas
-print("Creando features avanzadas de embeddings...")
+
+# --- PASO EXTRA: Aplicar las features estacionales sobre los agregados ---
+print("\nAplicando features de estacionalidad basadas en embeddings...")
 X = create_embedding_features(X_train_features)
 X_test = create_embedding_features(X_test_features)
 
-# (Ajusta esto según las columnas que realmente uses en tu 'X')
+print("Formas tras añadir features de estacionalidad:")
+print(f"X (train): {X.shape}")
+print(f"X_test:    {X_test.shape}")
+print("\n")
+
+# --- PASO 7: Actualizar Listas de Features con las nuevas columnas estacionales ---
+print("Actualizando listas de features para incluir features estacionales...")
+
+# Columnas numéricas: añadimos las nuevas features de embeddings
+NUMERICAL_FEATURES = [
+    'life_cycle_length', 'num_stores', 'num_sizes', 'has_plus_sizes', 'price',
+    'start_month',  # Feature de ingeniería
+    'similarity_to_season_center',  # Nueva feature estacional
+    'avg_distance_within_season',   # Nueva feature estacional
+    'similarity_to_nearest_seasons'  # Nueva feature estacional
+]
+
+# Columnas categóricas: añadimos embedding_cluster
 CATEGORICAL_FEATURES = [
     'id_season', 'aggregated_family', 'family', 'category', 'fabric', 
     'color_name', 'length_type', 'silhouette_type', 'waist_type', 
     'neck_lapel_type', 'sleeve_length_type', 'heel_shape_type', 
     'toecap_type', 'woven_structure', 'knit_structure', 'print_type', 
-    'archetype', 'moment', 'embedding_cluster'  # Añadimos el cluster de embedding
+    'archetype', 'moment', 
+    'embedding_cluster'  # Nueva feature estacional
 ]
 
-NUMERICAL_FEATURES = [
-    'life_cycle_length', 'num_stores', 'num_sizes', 'has_plus_sizes', 'price',
-    'similarity_to_season_center',  # Nueva feature
-    'avg_distance_within_season',   # Nueva feature
-    'similarity_to_nearest_seasons'  # Nueva feature
-]
+# La columna de embedding raw para PCA
+EMBEDDING_COLUMN = ['image_embedding']
 
-# La columna de embedding se maneja por separado
-EMBEDDING_COLUMN = ['image_embedding'] # Debe ser una lista para ColumnTransformer
+print(f"Features numéricas ({len(NUMERICAL_FEATURES)}): {NUMERICAL_FEATURES}")
+print(f"Features categóricas ({len(CATEGORICAL_FEATURES)}): {CATEGORICAL_FEATURES}")
+print("\n")
 
-
-# --- PASO 3: Crear los pipelines de preprocesamiento ---
+# --- PASO 8: Crear pipelines mejorados ---
+print("Creando pipelines de preprocesamiento mejorados...")
 
 # Pipeline para datos numéricos
 numeric_pipeline = Pipeline(steps=[
-    ('imputer', SimpleImputer(strategy='median')), # Rellenar faltantes con la mediana
-    ('scaler', StandardScaler())                   # Escalar datos
+    ('imputer', SimpleImputer(strategy='median')),
+    ('scaler', StandardScaler())
 ])
 
 # Pipeline para datos categóricos
 categorical_pipeline = Pipeline(steps=[
-    ('imputer', SimpleImputer(strategy='most_frequent')), # Rellenar faltantes con la moda
-    ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False)) # One-Hot Encoding
+    ('imputer', SimpleImputer(strategy='most_frequent')),
+    ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
 ])
 
-# Pipeline para los Embeddings:
-# 1. Llama a nuestra función 'parse_embeddings'
-# 2. Escala los valores (importante para PCA)
-# 3. Aplica PCA para reducir de N dimensiones (ej. 256) a 50
+# Pipeline para los embeddings: parser + PCA
 embedding_pipeline = Pipeline(steps=[
     ('parser', FunctionTransformer(parse_embeddings)),
     ('scaler', StandardScaler()),
-    ('pca', PCA(n_components=50, random_state=42)) # Aumentamos a 50 componentes
+    ('pca', PCA(n_components=50, random_state=42))
 ])
 
-# --- PASO 4: Unir todo con ColumnTransformer ---
-preprocessor = ColumnTransformer(
+# ColumnTransformer mejorado
+preprocessor_advanced = ColumnTransformer(
     transformers=[
         ('num', numeric_pipeline, NUMERICAL_FEATURES),
         ('cat', categorical_pipeline, CATEGORICAL_FEATURES),
         ('embed', embedding_pipeline, EMBEDDING_COLUMN)
     ],
-    remainder='drop' # Ignora columnas que no estén en las listas
+    remainder='drop'
 )
 
-# --- PASO 5: Definir el Modelo (LGBM Quantile) ---
+print("Preprocessor avanzado creado.")
+print("\n")
+
+# --- PASO 9: Crear modelo LightGBM con regresión de cuantiles ---
+print("Configurando modelo LightGBM con regresión de cuantiles...")
+
 lgbm_model = lgb.LGBMRegressor(
-    objective='quantile',  # <-- Objetivo: Regresión de Cuantiles
-    alpha=0.70,            # <-- Predecimos el percentil 70 (ajustado de 75)
-    n_estimators=1500,     # Aumentamos árboles
-    learning_rate=0.03,    # Reducimos learning rate
-    num_leaves=45,         # Aumentamos complejidad
-    max_depth=8,           # Limitamos profundidad
-    min_child_samples=20,  # Mínimo de muestras por hoja
-    subsample=0.8,         # Bagging
-    colsample_bytree=0.8,  # Feature sampling
-    reg_alpha=0.1,         # L1 regularization
-    reg_lambda=0.1,        # L2 regularization
+    objective='quantile',
+    alpha=0.70,  # Percentil 70
+    n_estimators=1500,
+    learning_rate=0.03,
+    num_leaves=45,
+    max_depth=8,
+    min_child_samples=20,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    reg_alpha=0.1,
+    reg_lambda=0.1,
     n_jobs=-1,
     random_state=42,
     verbose=-1
 )
 
-# --- PASO 6: Crear el Pipeline Final ---
-full_pipeline = Pipeline(steps=[
-    ('preprocessor', preprocessor),
+# Pipeline final avanzado
+full_pipeline_advanced = Pipeline(steps=[
+    ('preprocessor', preprocessor_advanced),
     ('model', lgbm_model)
 ])
 
-print("¡Nuevo 'full_pipeline' (con Embeddings + Quantile) creado!")
-print("---")
+print("Pipeline completo creado (Preprocessor + LightGBM Quantile).")
+print("\n")
 
+# --- PASO 10: Entrenar con todos los datos ---
+print("="*60)
+print("ENTRENAMIENTO FINAL CON TODOS LOS DATOS")
+print("="*60)
+print("Entrenando modelo con el 100% de los datos de entrenamiento...")
 
-# --- PASO 7: Predicción Final y Archivo de Envío ---
-# (Este es tu código original, que ahora usa el 'full_pipeline' de arriba)
+full_pipeline_advanced.fit(X, y)
 
-print("Iniciando Paso 7: Predicción Final...")
+print("¡Modelo entrenado con éxito!")
+print("\n")
 
-# --- Tarea 1: Entrenar con TODOS los datos ---
-print("Re-entrenando el modelo con el 100% de los datos de entrenamiento...")
-# Asumiendo que 'X', 'y', 'X_test_features' y 'test_ids_for_submission'
-# fueron cargados en pasos anteriores (1-6)
-full_pipeline.fit(X, y)
+# --- PASO 11: Generar predicciones finales ---
+print("Generando predicciones sobre datos de test...")
 
-print("¡Modelo final entrenado!")
+final_predictions = full_pipeline_advanced.predict(X_test)
 
-# --- Tarea 2: Predecir sobre test_df_clean ---
-print("Generando predicciones sobre los datos de test...")
-# Usamos X_test que ya tiene las features de embeddings creadas
-final_predictions = full_pipeline.predict(X_test)
+print(f"Predicciones generadas: {len(final_predictions)} productos")
+print(f"Rango de predicciones: [{final_predictions.min():.2f}, {final_predictions.max():.2f}]")
+print("\n")
 
-print("¡Predicciones generadas!")
+# --- PASO 12: Post-procesamiento ---
+print("Aplicando post-procesamiento...")
 
-# --- Tarea 3: Post-Procesamiento (¡MUY IMPORTANTE!) ---
-# La demanda no puede ser negativa.
+# Ajustar predicciones negativas a 0
 final_predictions[final_predictions < 0] = 0
 print("Predicciones negativas ajustadas a 0.")
+print(f"Rango final: [{final_predictions.min():.2f}, {final_predictions.max():.2f}]")
+print("\n")
 
-# --- Tarea 4: Crear Archivo de Envío ---
-# Usamos los 'test_ids_for_submission' que guardamos en el Paso 2
-# y nuestras 'final_predictions'
+# --- PASO 13: Crear archivo de submission ---
+print("="*60)
+print("CREANDO ARCHIVO DE SUBMISSION")
+print("="*60)
+
 submission_df = pd.DataFrame({
     'ID': test_ids_for_submission,
     'demand': final_predictions
 })
 
-# --- Tarea 5: Guardar el Archivo ---
-submission_filename = 'submission_v3_season_embeddings.csv'
+# Nombre del archivo
+submission_filename = 'submission_EDA3_complete.csv'
 submission_df.to_csv(submission_filename, index=False, sep=',')
 
-print("\n")
-print("="*50)
 print(f"¡Archivo '{submission_filename}' creado con éxito!")
-print("="*50)
-print("Vistazo al archivo de envío:")
-print(submission_df.head())
+print("\nVistazo al archivo de envío:")
+print(submission_df.head(10))
+print("\nEstadísticas de las predicciones:")
+print(submission_df['demand'].describe())
 print("\n")
-print("¡Paso 7 completado!")
-print(f"\nMejoras implementadas:")
-print("- Clustering de embeddings por temporada")
-print("- Similitud con centroide de temporada")
-print("- Distancias intra-temporada")
-print("- Similitud con temporadas cercanas")
-print("- Modelo LGBM optimizado con regularización")
+
+print("="*60)
+print("PROCESO COMPLETADO")
+print("="*60)
+print("\nMejoras implementadas en este modelo:")
+print("✓ Clustering de embeddings por temporada")
+print("✓ Similitud con centroide de temporada")
+print("✓ Distancias intra-temporada")
+print("✓ Similitud con temporadas cercanas")
+print("✓ PCA sobre embeddings originales (50 componentes)")
+print("✓ Modelo LightGBM con regresión de cuantiles (p70)")
+print("✓ Regularización L1/L2 para evitar overfitting")
+print(f"\n📁 Archivo listo para enviar: {submission_filename}")
+print("="*60)
+
