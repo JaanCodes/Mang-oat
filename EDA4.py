@@ -68,10 +68,10 @@ print(f"Formas Agregadas: X={X.shape}, y={y.shape}, X_test={X_test.shape}")
 
 
 # --- [PASO 3: Ingeniería de Fechas y Estacionalidad (Fourier)] ---
-print("--- Creando features de Fourier (sin/cos) para 'start_month' ---")
+print("--- Creando features de Fourier y Temporada ('season') ---")
 
 def create_temporal_features(df):
-    """Crea features de mes y las transforma en sin/cos."""
+    """Crea features de mes, temporada (Winter/Summer...) y sin/cos."""
     df_copy = df.copy()
     
     # 1. Crear 'start_month' (1-12)
@@ -79,23 +79,35 @@ def create_temporal_features(df):
     df_copy['start_month'] = df_copy['phase_in'].dt.month
     
     # 2. Rellenar nulos del mes
-    # Usamos 6.5 (entre junio y julio) como mediana neutral
-    median_month = 6.5 
+    median_month = 6.5 # (entre junio y julio)
     df_copy['start_month'] = df_copy['start_month'].fillna(median_month)
 
-    # 3. Crear Features de Fourier (La "Sinuide")
-    # Esto convierte el mes (1-12) en un círculo perfecto
+    # 3. ***NUEVO: Crear feature 'season'***
+    # Mapeo de meses a temporadas
+    season_map = {
+        1: 'Winter', 2: 'Winter',
+        3: 'Spring', 4: 'Spring', 5: 'Spring',
+        6: 'Summer', 7: 'Summer', 8: 'Summer',
+        9: 'Autumn', 10: 'Autumn', 11: 'Autumn',
+        12: 'Winter'
+    }
+    # El .round() en el mes imputado (6.5) lo convierte en 7 (Summer), lo cual es una buena imputación
+    df_copy['season'] = df_copy['start_month'].round().astype(int).map(season_map)
+    # Rellenar 'season' por si algún mapeo falla
+    df_copy['season'] = df_copy['season'].fillna('Unknown')
+    
+    # 4. Crear Features de Fourier (La "Sinuide")
     df_copy['month_sin'] = np.sin(2 * np.pi * df_copy['start_month'] / 12)
     df_copy['month_cos'] = np.cos(2 * np.pi * df_copy['start_month'] / 12)
     
-    # 4. Eliminar la columna original, ya no es necesaria
+    # 5. Eliminar la columna original, ya no es necesaria
     df_copy = df_copy.drop('start_month', axis=1)
     
     return df_copy
 
 X = create_temporal_features(X)
 X_test = create_temporal_features(X_test)
-print("Features 'month_sin' y 'month_cos' creadas.")
+print("Features 'month_sin', 'month_cos' y 'season' creadas.")
 
 
 # --- [PASO 4: Ingeniería de Embeddings Estacionales (Tu función)] ---
@@ -196,6 +208,43 @@ X = create_embedding_features(X)
 X_test = create_embedding_features(X_test)
 
 
+# --- [PASO 4.5: Creación de Features de Interacción (Tendencias)] ---
+print("--- Creando features de Interacción (Tendencias) ---")
+
+def create_trend_features(df):
+    """
+    Crea features de interacción entre atributos clave y la temporada.
+    Esto es exactamente lo que pediste: "manga larga en invierno".
+    """
+    df_copy = df.copy()
+    
+    # 'season' debe existir del PASO 3
+    if 'season' not in df_copy.columns:
+        print("Error: La columna 'season' no se encontró. Asegúrate de que PASO 3 la crea.")
+        return df
+    
+    # Lista de atributos clave que interactúan con la temporada
+    # (puedes añadir más si lo ves necesario, ej: 'category', 'moment')
+    trend_attributes = ['sleeve_length_type', 'family', 'fabric', 'length_type']
+    
+    for attr in trend_attributes:
+        if attr in df_copy.columns:
+            # Rellenamos NaNs con 'NA' para que la concatenación cree una categoría válida
+            attr_col = df_copy[attr].fillna('NA').astype(str)
+            season_col = df_copy['season'].astype(str) # 'season' ya no debería tener NaNs
+            
+            # Nueva columna de interacción (ej: 'Long_S_Winter')
+            df_copy[f'{attr}_X_season'] = attr_col + '_S_' + season_col
+        else:
+            print(f"Info: Columna '{attr}' no encontrada, se omite interacción.")
+            
+    return df_copy
+
+X = create_trend_features(X)
+X_test = create_trend_features(X_test)
+print("Features de interacción (ej: 'sleeve_length_type_X_season') creadas.")
+
+
 # --- [PASO 5: Definición de Features y Pipelines] ---
 print("--- Definiendo listas de Features y Pipelines ---")
 
@@ -223,11 +272,11 @@ def parse_embeddings(df_column):
 # --- Listas de Features (ACTUALIZADAS) ---
 NUMERIC_FEATURES = [
     'life_cycle_length', 'num_stores', 'num_sizes', 'has_plus_sizes', 'price',
-    'month_sin',     # <-- Feature de Fourier
-    'month_cos',     # <-- Feature de Fourier
-    'similarity_to_season_center',   # <-- Feature de Embedding
-    'avg_distance_within_season',    # <-- Feature de Embedding
-    'similarity_to_nearest_seasons'  # <-- Feature de Embedding
+    'month_sin',                      # <-- Feature de Fourier
+    'month_cos',                      # <-- Feature de Fourier
+    'similarity_to_season_center',    # <-- Feature de Embedding
+    'avg_distance_within_season',     # <-- Feature de Embedding
+    'similarity_to_nearest_seasons'   # <-- Feature de Embedding
 ]
 CATEGORICAL_FEATURES = [
     'id_season', 'aggregated_family', 'family', 'category', 'fabric', 
@@ -235,7 +284,14 @@ CATEGORICAL_FEATURES = [
     'neck_lapel_type', 'sleeve_length_type', 'heel_shape_type', 
     'toecap_type', 'woven_structure', 'knit_structure', 'print_type', 
     'archetype', 'moment', 
-    'embedding_cluster' # <-- Feature de Embedding
+    'embedding_cluster',              # <-- Feature de Embedding
+    
+    # --- NUEVAS FEATURES DE TENDENCIA ---
+    'season',                         # La temporada (Winter, Summer, etc.)
+    'sleeve_length_type_X_season',    # Interacción Manga <-> Temporada
+    'family_X_season',                # Interacción Familia <-> Temporada
+    'fabric_X_season',                # Interacción Tejido <-> Temporada
+    'length_type_X_season'            # Interacción Largo <-> Temporada
 ]
 EMBEDDING_COLUMN = ['image_embedding'] # Columna original para PCA
 
@@ -253,7 +309,7 @@ numeric_pipeline = Pipeline(steps=[
 embedding_pipeline_pca = Pipeline(steps=[
     ('parser', FunctionTransformer(parse_embeddings)),
     ('scaler', StandardScaler()),
-    ('pca', PCA(n_components=40, random_state=42)) # 50 componentes
+    ('pca', PCA(n_components=40, random_state=42)) # 40 componentes
 ])
 
 # --- Pipeline 1: Preprocesador para LightGBM (con One-Hot Encoding) ---
@@ -386,7 +442,7 @@ submission_df = pd.DataFrame({
 })
 
 # Guardar archivo
-submission_filename = 'submission_GroupKFold_Ensemble_Fourier.csv'
+submission_filename = 'submission_GroupKFold_Ensemble_Fourier_Trends.csv' # Nombre actualizado
 submission_df.to_csv(submission_filename, index=False, sep=',')
 
 print(f"¡Archivo '{submission_filename}' creado con éxito!")
