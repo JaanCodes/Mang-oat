@@ -1,7 +1,2 @@
-<<<<<<< HEAD
-=======
 train.csv
-
-# Ignore the training artifact from the cleaning notebook (keep locally, don't push)
-limpieza1/train_cleaned.csv
->>>>>>> 136a33e527a500abc8283322f9aab13c83b608b3
+test.csv
