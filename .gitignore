@@ -1,1 +1,4 @@
 train.csv
+
+# Ignore the training artifact from the cleaning notebook (keep locally, don't push)
+limpieza1/train_cleaned.csv
