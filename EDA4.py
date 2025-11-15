@@ -253,7 +253,7 @@ numeric_pipeline = Pipeline(steps=[
 embedding_pipeline_pca = Pipeline(steps=[
     ('parser', FunctionTransformer(parse_embeddings)),
     ('scaler', StandardScaler()),
-    ('pca', PCA(n_components=50, random_state=42)) # 50 componentes
+    ('pca', PCA(n_components=40, random_state=42)) # 50 componentes
 ])
 
 # --- Pipeline 1: Preprocesador para LightGBM (con One-Hot Encoding) ---
