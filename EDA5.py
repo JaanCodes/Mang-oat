@@ -45,11 +45,12 @@ except FileNotFoundError:
 
 print(f"Datos cargados: Train={train_df.shape}, Test={test_df.shape}")
 
-# --- [PASO 2: Agregación de Datos] ---
+# --- [PASO 2: Agregación de Datos CONSERVADORA] ---
 print("--- Agregando Datos (groupby ID) ---")
 # Target
 y_train_agg = train_df.groupby('ID')['weekly_demand'].sum()
-# Features
+
+# Features: usar .first() para atributos de producto
 X_train_agg_full = train_df.groupby('ID').first()
 
 # Alinear columnas entre train y test
@@ -82,8 +83,7 @@ def create_temporal_features(df):
     median_month = 6.5 # (entre junio y julio)
     df_copy['start_month'] = df_copy['start_month'].fillna(median_month)
 
-    # 3. ***NUEVO: Crear feature 'season'***
-    # Mapeo de meses a temporadas
+    # 3. Crear feature 'season'
     season_map = {
         1: 'Winter', 2: 'Winter',
         3: 'Spring', 4: 'Spring', 5: 'Spring',
@@ -91,16 +91,14 @@ def create_temporal_features(df):
         9: 'Autumn', 10: 'Autumn', 11: 'Autumn',
         12: 'Winter'
     }
-    # El .round() en el mes imputado (6.5) lo convierte en 7 (Summer), lo cual es una buena imputación
     df_copy['season'] = df_copy['start_month'].round().astype(int).map(season_map)
-    # Rellenar 'season' por si algún mapeo falla
     df_copy['season'] = df_copy['season'].fillna('Unknown')
     
-    # 4. Crear Features de Fourier (La "Sinuide")
+    # 4. Crear Features de Fourier
     df_copy['month_sin'] = np.sin(2 * np.pi * df_copy['start_month'] / 12)
     df_copy['month_cos'] = np.cos(2 * np.pi * df_copy['start_month'] / 12)
     
-    # 5. Eliminar la columna original, ya no es necesaria
+    # 5. Eliminar la columna original
     df_copy = df_copy.drop('start_month', axis=1)
     
     return df_copy
@@ -110,7 +108,7 @@ X_test = create_temporal_features(X_test)
 print("Features 'month_sin', 'month_cos' y 'season' creadas.")
 
 
-# --- [PASO 4: Ingeniería de Embeddings Estacionales (Tu función)] ---
+# --- [PASO 4: Ingeniería de Embeddings Estacionales] ---
 print("--- Creando features de embeddings estacionales ---")
 
 def create_embedding_features(df, embedding_col='image_embedding'):
@@ -130,7 +128,7 @@ def create_embedding_features(df, embedding_col='image_embedding'):
 
     # Asegurar que todos los embeddings tengan la misma longitud (padding)
     max_len = max(len(e) for e in df['embedding_parsed'])
-    max_len = max(max_len, 256) # Asegurar al menos 256
+    max_len = max(max_len, 256)
     
     df['embedding_parsed'] = df['embedding_parsed'].apply(
         lambda x: np.pad(x, (0, max_len - len(x)), 'constant') if len(x) < max_len else x[:max_len]
@@ -149,10 +147,10 @@ def create_embedding_features(df, embedding_col='image_embedding'):
     # --- Clustering por temporada ---
     season_clusters = {}
     for season in unique_seasons:
-        if season == -1: continue # Ignorar 'temporada desconocida'
+        if season == -1: continue
         season_mask = (df['id_season'] == season)
         season_embeddings = embeddings_matrix[season_mask]
-        if len(season_embeddings) > 5: # Solo si hay suficientes muestras
+        if len(season_embeddings) > 5:
             n_clusters = min(5, len(season_embeddings) // 10 + 1)
             kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
             clusters = kmeans.fit_predict(season_embeddings)
@@ -180,23 +178,20 @@ def create_embedding_features(df, embedding_col='image_embedding'):
         if season == -1: continue
         season_mask = (df['id_season'] == season)
         season_embeddings = embeddings_matrix[season_mask]
-        if len(season_embeddings) > 1: # Necesitas al menos 2 para comparar
+        if len(season_embeddings) > 1:
             distances = cdist(season_embeddings, season_embeddings, metric='euclidean')
-            # Distancia media (dividido por N-1)
             avg_dists = distances.sum(axis=1) / (len(season_embeddings) - 1)
             df.loc[season_mask, 'avg_distance_within_season'] = avg_dists
 
-    # --- Similitud entre temporadas (tendencias) ---
+    # --- Similitud entre temporadas ---
     if len(season_centroids) > 1:
         centroid_matrix = np.array(list(season_centroids.values()))
         
         for idx, (season, centroid) in enumerate(season_centroids.items()):
             season_mask = (df['id_season'] == season)
-            # Comparar con todos los *otros* centroides
             other_centroids = np.delete(centroid_matrix, idx, axis=0)
             if other_centroids.shape[0] > 0:
                 sims = cosine_similarity(centroid.reshape(1, -1), other_centroids).flatten()
-                # Similitud media con las 3 temporadas más parecidas
                 top_sims = np.sort(sims)[-3:] if len(sims) >= 3 else sims
                 df.loc[season_mask, 'similarity_to_nearest_seasons'] = top_sims.mean()
 
@@ -212,28 +207,19 @@ X_test = create_embedding_features(X_test)
 print("--- Creando features de Interacción (Tendencias) ---")
 
 def create_trend_features(df):
-    """
-    Crea features de interacción entre atributos clave y la temporada.
-    Esto es exactamente lo que pediste: "manga larga en invierno".
-    """
+    """Crea features de interacción entre atributos clave y la temporada."""
     df_copy = df.copy()
     
-    # 'season' debe existir del PASO 3
     if 'season' not in df_copy.columns:
-        print("Error: La columna 'season' no se encontró. Asegúrate de que PASO 3 la crea.")
+        print("Error: La columna 'season' no se encontró.")
         return df
     
-    # Lista de atributos clave que interactúan con la temporada
-    # (puedes añadir más si lo ves necesario, ej: 'category', 'moment')
     trend_attributes = ['sleeve_length_type', 'family', 'fabric', 'length_type']
     
     for attr in trend_attributes:
         if attr in df_copy.columns:
-            # Rellenamos NaNs con 'NA' para que la concatenación cree una categoría válida
             attr_col = df_copy[attr].fillna('NA').astype(str)
-            season_col = df_copy['season'].astype(str) # 'season' ya no debería tener NaNs
-            
-            # Nueva columna de interacción (ej: 'Long_S_Winter')
+            season_col = df_copy['season'].astype(str)
             df_copy[f'{attr}_X_season'] = attr_col + '_S_' + season_col
         else:
             print(f"Info: Columna '{attr}' no encontrada, se omite interacción.")
@@ -242,7 +228,7 @@ def create_trend_features(df):
 
 X = create_trend_features(X)
 X_test = create_trend_features(X_test)
-print("Features de interacción (ej: 'sleeve_length_type_X_season') creadas.")
+print("Features de interacción creadas.")
 
 
 # --- [PASO 5: Definición de Features y Pipelines] ---
@@ -255,12 +241,10 @@ def parse_embeddings(df_column):
         lambda x: [float(v) for v in x.split(',') if v.strip()] if x else []
     )
     try:
-        # Encontrar la primera dimensión válida
         target_dim = len(next(item for item in embeddings_list if item))
     except StopIteration:
-        target_dim = 256 # Default si no hay embeddings
+        target_dim = 256
     
-    # Función interna para rellenar o truncar
     def pad_or_truncate(e_list, dim):
         if len(e_list) > dim: return e_list[:dim]
         if len(e_list) < dim: return e_list + [0.0] * (dim - len(e_list))
@@ -269,52 +253,41 @@ def parse_embeddings(df_column):
     processed_list = [pad_or_truncate(e, target_dim) for e in embeddings_list]
     return np.array(processed_list)
 
-# --- Listas de Features (ACTUALIZADAS) ---
+# --- Listas de Features ---
 NUMERIC_FEATURES = [
     'life_cycle_length', 'num_stores', 'num_sizes', 'has_plus_sizes', 'price',
-    'month_sin',                      # <-- Feature de Fourier
-    'month_cos',                      # <-- Feature de Fourier
-    'similarity_to_season_center',    # <-- Feature de Embedding
-    'avg_distance_within_season',     # <-- Feature de Embedding
-    'similarity_to_nearest_seasons'   # <-- Feature de Embedding
+    'month_sin', 'month_cos',
+    'similarity_to_season_center', 'avg_distance_within_season', 'similarity_to_nearest_seasons'
 ]
 CATEGORICAL_FEATURES = [
     'id_season', 'aggregated_family', 'family', 'category', 'fabric', 
     'color_name', 'length_type', 'silhouette_type', 'waist_type', 
     'neck_lapel_type', 'sleeve_length_type', 'heel_shape_type', 
     'toecap_type', 'woven_structure', 'knit_structure', 'print_type', 
-    'archetype', 'moment', 
-    'embedding_cluster',              # <-- Feature de Embedding
-    
-    # --- NUEVAS FEATURES DE TENDENCIA ---
-    'season',                         # La temporada (Winter, Summer, etc.)
-    'sleeve_length_type_X_season',    # Interacción Manga <-> Temporada
-    'family_X_season',                # Interacción Familia <-> Temporada
-    'fabric_X_season',                # Interacción Tejido <-> Temporada
-    'length_type_X_season'            # Interacción Largo <-> Temporada
+    'archetype', 'moment', 'embedding_cluster',
+    'season',
+    'sleeve_length_type_X_season', 'family_X_season', 'fabric_X_season', 'length_type_X_season'
 ]
-EMBEDDING_COLUMN = ['image_embedding'] # Columna original para PCA
+EMBEDDING_COLUMN = ['image_embedding']
 
 print(f"Features Numéricas: {len(NUMERIC_FEATURES)}")
 print(f"Features Categóricas: {len(CATEGORICAL_FEATURES)}")
-print(f"Features de Embedding (PCA): 1")
 
-# --- Pipeline Numérico (Común para ambos modelos) ---
+# --- Pipelines ---
 numeric_pipeline = Pipeline(steps=[
     ('imputer', SimpleImputer(strategy='median')),
     ('scaler', StandardScaler())
 ])
 
-# --- Pipeline de Embedding (Común para ambos modelos) ---
 embedding_pipeline_pca = Pipeline(steps=[
     ('parser', FunctionTransformer(parse_embeddings)),
     ('scaler', StandardScaler()),
-    ('pca', PCA(n_components=40, random_state=42)) # 40 componentes
+    ('pca', PCA(n_components=40, random_state=42))
 ])
 
-# --- Pipeline 1: Preprocesador para LightGBM (con One-Hot Encoding) ---
+# Pipeline para LightGBM (One-Hot Encoding)
 categorical_pipeline_ohe = Pipeline(steps=[
-    ('imputer', SimpleImputer(strategy='most_frequent')), # 'most_frequent' o 'constant'
+    ('imputer', SimpleImputer(strategy='most_frequent')),
     ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
 ])
 
@@ -328,10 +301,8 @@ preprocessor_lgbm = ColumnTransformer(
     n_jobs=-1
 )
 
-# --- Pipeline 2: Preprocesador para CatBoost (Manejo Nativo de Categóricas) ---
-# CatBoost maneja NaNs nativamente, pero necesitamos convertir las categóricas a string
+# Pipeline para CatBoost
 def convert_to_string(X):
-    """Convierte todas las columnas a string y rellena NaNs."""
     X_copy = X.copy()
     for col in X_copy.columns:
         X_copy[col] = X_copy[col].fillna('_MISSING_').astype(str)
@@ -352,104 +323,99 @@ preprocessor_catboost = ColumnTransformer(
 )
 
 
-# --- [PASO 6: Definición de Modelos] ---
+# --- [PASO 6: Definición de Modelos OPTIMIZADOS] ---
 print("--- Definiendo Modelos (LGBM y CatBoost) ---")
 
-# Modelo 1: LightGBM (con tus hiperparámetros)
+# Modelo 1: LightGBM (Optimizado para minimizar ventas perdidas)
 lgbm_model = lgb.LGBMRegressor(
     objective='quantile',
-    alpha=0.80,          # Percentil 70
-    n_estimators=1500,
-    learning_rate=0.03,
-    num_leaves=45,
-    max_depth=8,
-    min_child_samples=20,
-    subsample=0.8,
-    colsample_bytree=0.8,
-    reg_alpha=0.1,
-    reg_lambda=0.1,
+    alpha=0.75,          # Percentil 75 (balance entre exceso y ventas perdidas)
+    n_estimators=2500,
+    learning_rate=0.02,
+    num_leaves=55,
+    max_depth=10,
+    min_child_samples=10,
+    subsample=0.85,
+    colsample_bytree=0.85,
+    reg_alpha=0.01,
+    reg_lambda=0.01,
     n_jobs=-1,
     random_state=42,
     verbose=-1
 )
 
-# Pipeline completo para LGBM
 lgbm_pipeline = Pipeline(steps=[
     ('preprocessor', preprocessor_lgbm),
     ('model', lgbm_model)
 ])
 
 # Modelo 2: CatBoost
-# Necesitamos decirle a CatBoost qué columnas son categóricas
-# (después del preprocesador)
 cat_feature_indices = list(range(len(NUMERIC_FEATURES), len(NUMERIC_FEATURES) + len(CATEGORICAL_FEATURES)))
 
 catboost_model = CatBoostRegressor(
-    iterations=1500,
-    learning_rate=0.03,
-    depth=8,
-    l2_leaf_reg=3.0,
-    loss_function='Quantile:alpha=0.70', # Mismo objetivo que LGBM
+    iterations=2500,
+    learning_rate=0.02,
+    depth=10,
+    l2_leaf_reg=1.5,
+    loss_function='Quantile:alpha=0.75',
     eval_metric='MAE',
     random_seed=42,
     verbose=0,
-    cat_features=cat_feature_indices, # <-- Clave para CatBoost
-    # task_type="GPU", # Descomentar si tienes GPU y CatBoost con soporte
+    cat_features=cat_feature_indices,
 )
 
-# Pipeline completo para CatBoost
 catboost_pipeline = Pipeline(steps=[
     ('preprocessor', preprocessor_catboost),
     ('model', catboost_model)
 ])
 
 
-# --- [PASO 7: Entrenamiento Simple (Sin Validación Cruzada)] ---
+# --- [PASO 7: Entrenamiento] ---
 print("\n" + "="*60)
-print("ENTRENANDO MODELOS CON TODO EL CONJUNTO DE ENTRENAMIENTO")
+print("ENTRENANDO MODELOS")
 print("="*60)
 
-# --- Entrenar LightGBM ---
 print("Entrenando LightGBM...")
 lgbm_pipeline.fit(X, y)
 print("LightGBM entrenado.")
 
-# --- Entrenar CatBoost ---
 print("Entrenando CatBoost...")
 catboost_pipeline.fit(X, y)
 print("CatBoost entrenado.")
 
 
-# --- [PASO 8: Creación del Archivo de Submission Final] ---
+# --- [PASO 8: Predicciones y Submission] ---
 print("\n" + "="*60)
-print("GENERANDO PREDICCIONES FINALES (SOBRE TEST)")
+print("GENERANDO PREDICCIONES FINALES")
 print("="*60)
 
-# Predecir sobre el conjunto de test
+# Predecir
 final_preds_lgbm = lgbm_pipeline.predict(X_test)
 final_preds_catboost = catboost_pipeline.predict(X_test)
 
-# Ensamble final (promedio de los dos modelos)
-final_predictions = (final_preds_lgbm * 0.2 + final_preds_catboost * 0.8)
+# Ensamble (60% LGBM, 40% CatBoost - LGBM suele ser mejor en este tipo de datos)
+final_predictions = (final_preds_lgbm * 0.6 + final_preds_catboost * 0.4)
 
-# Post-procesamiento final (asegurar que no haya demanda negativa)
+# Post-procesamiento
 final_predictions[final_predictions < 0] = 0
 
-# Crear DataFrame de submission
+# Ajuste conservador: +5% para compensar ventas perdidas
+final_predictions = final_predictions * 1.05
+
+# Crear submission
 submission_df = pd.DataFrame({
     'ID': test_ids_for_submission,
-    'demand': final_predictions
+    'Production': final_predictions
 })
 
-# Guardar archivo
-submission_filename = 'submission_GroupKFold_Ensemble_Fourier_Trends.csv' # Nombre actualizado
+submission_filename = 'submission_optimized_v3.csv'
 submission_df.to_csv(submission_filename, index=False, sep=',')
 
 print(f"¡Archivo '{submission_filename}' creado con éxito!")
 print("\nVistazo al archivo de envío:")
 print(submission_df.head(10))
 print("\nEstadísticas de las predicciones:")
-print(submission_df['demand'].describe())
+print(submission_df['Production'].describe())
 print("\n" + "="*60)
 print("PROCESO COMPLETADO")
 print("="*60)
