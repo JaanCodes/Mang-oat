@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_spinkit/flutter_spinkit.dart';
 import 'package:mangoat/services/gemini_service.dart';
@@ -43,34 +44,85 @@ class _ResultsScreenState extends State<ResultsScreen> {
       // Inicializar el servicio de predicción
       await _predictionService.initialize();
 
-      // Obtener tags, descripción y datos del producto en paralelo
-      final results = await Future.wait([
-        _geminiService.analyzeClothing(widget.imageFile),
-        _geminiService.extractProductData(widget.imageFile),
-      ]);
+      // Análisis completo con IA en una sola petición
+      final aiResult = await _geminiService.analyzeComplete(widget.imageFile);
 
-      final productData = results[1] as ProductData;
+      final tags = aiResult.descriptiveTags; // Tags descriptivos para mostrar
+      final specificTags = aiResult.specificTags; // Tags técnicos para lógica
+      final productData = aiResult.productData;
 
-      // Hacer la predicción de demanda
-      final prediction = await _predictionService.predictWithDetails(
-        productData,
+      // Crear PredictionResult con datos de IA
+      final prediction = PredictionResult(
+        predictedDemand: aiResult.weeklyDemand,
+        season: _getCurrentSeason(),
+        confidence: aiResult.confidence,
+        factors: {
+          'Tipo': productData.family,
+          'Estilo': productData.archetype,
+          'Material': productData.fabric,
+          'Precio': '\$${productData.price.toStringAsFixed(2)}',
+        },
       );
 
-      // Obtener predicciones de 12 meses (modelo KNN)
+      // Obtener predicciones de 12 meses (modelo KNN + estacionalidad por tags)
       final monthlyPredictions = await _predictionService.predict12Months(
         productData,
       );
 
-      // Obtener predicciones de IA (LLM con estacionalidad)
-      final aiPredictions = await _geminiService.predictMonthlyDemandWithAI(
+      // Aplicar estacionalidad basada en tags ESPECÍFICOS para ambas líneas del gráfico
+      var adjustedMonthlyPredictions = _applyTagSeasonality(
+        monthlyPredictions,
+        specificTags,
         productData,
       );
 
+      // La línea "AI Generated" también usa la misma lógica de estacionalidad
+      // pero con valores base ligeramente diferentes para comparación
+      var aiPredictionsList = _applyTagSeasonality(
+        monthlyPredictions
+            .map(
+              (p) => MonthlyPrediction(
+                month: p.month,
+                weeklyDemand: p.weeklyDemand * 0.95, // Variación del 5%
+                monthlyDemand: p.monthlyDemand * 0.95,
+              ),
+            )
+            .toList(),
+        specificTags,
+        productData,
+      );
+
+      // Normalizar ambas listas si algún valor supera 10000
+      adjustedMonthlyPredictions = _normalizePredictions(
+        adjustedMonthlyPredictions,
+      );
+      aiPredictionsList = _normalizePredictions(aiPredictionsList);
+
+      final aiPredictions = aiPredictionsList
+          .map((p) => p.monthlyDemand)
+          .toList();
+
+      // Calcular demanda realista basada en las predicciones reales y la confianza
+      final realDemand = _calculateRealisticDemand(
+        adjustedMonthlyPredictions,
+        aiResult.weeklyDemand,
+        aiResult.confidence,
+        productData,
+      );
+
+      // Actualizar la predicción con el valor realista
+      final updatedPrediction = PredictionResult(
+        predictedDemand: realDemand,
+        season: prediction.season,
+        confidence: prediction.confidence,
+        factors: prediction.factors,
+      );
+
       setState(() {
-        _tags = results[0] as List<String>;
+        _tags = tags;
         _productData = productData;
-        _prediction = prediction;
-        _monthlyPredictions = monthlyPredictions;
+        _prediction = updatedPrediction;
+        _monthlyPredictions = adjustedMonthlyPredictions;
         _aiPredictions = aiPredictions;
         _isLoading = false;
       });
@@ -80,6 +132,189 @@ class _ResultsScreenState extends State<ResultsScreen> {
         _isLoading = false;
       });
     }
+  }
+
+  /// Normaliza las predicciones para que ningún valor supere 10000
+  List<MonthlyPrediction> _normalizePredictions(
+    List<MonthlyPrediction> predictions,
+  ) {
+    if (predictions.isEmpty) return predictions;
+
+    // Encontrar el valor máximo
+    final maxWeekly = predictions
+        .map((p) => p.weeklyDemand)
+        .reduce((a, b) => a > b ? a : b);
+
+    // Solo normalizar si algún valor supera 10000
+    if (maxWeekly <= 10000) return predictions;
+
+    // Factor de normalización
+    final normalizationFactor = 10000.0 / maxWeekly;
+
+    // Aplicar normalización
+    return predictions.map((p) {
+      final normalizedWeekly = p.weeklyDemand * normalizationFactor;
+      return MonthlyPrediction(
+        month: p.month,
+        weeklyDemand: normalizedWeekly,
+        monthlyDemand: normalizedWeekly * 4.33,
+      );
+    }).toList();
+  }
+
+  /// Calcula una demanda realista basada en la media de predicciones y confianza
+  double _calculateRealisticDemand(
+    List<MonthlyPrediction> predictions,
+    double aiEstimate,
+    double confidence,
+    ProductData product,
+  ) {
+    if (predictions.isEmpty) return aiEstimate;
+
+    // 1. Calcular la media de las predicciones mensuales
+    final weeklyPredictions = predictions.map((p) => p.weeklyDemand).toList();
+    final meanWeekly =
+        weeklyPredictions.reduce((a, b) => a + b) / weeklyPredictions.length;
+
+    // 2. Calcular la desviación estándar (varianza)
+    final variance =
+        weeklyPredictions
+            .map((v) {
+              final diff = v - meanWeekly;
+              return diff * diff;
+            })
+            .reduce((a, b) => a + b) /
+        weeklyPredictions.length;
+    final stdDev = sqrt(variance);
+
+    // 3. Calcular el peso de la estimación de IA vs modelo basado en confianza
+    // Alta confianza = más peso a la IA, Baja confianza = más peso al modelo
+    final aiWeight = confidence / 100.0; // 0.6 a 0.95
+    final modelWeight = 1.0 - aiWeight;
+
+    // 4. Combinar estimación de IA con la media del modelo
+    double combinedEstimate =
+        (aiEstimate * aiWeight) + (meanWeekly * modelWeight);
+
+    // 5. Ajustar por variabilidad (si hay alta varianza, añadir incertidumbre)
+    final variabilityFactor = 1.0 + (stdDev / meanWeekly * 0.1); // Máximo +10%
+    combinedEstimate *= variabilityFactor;
+
+    // 6. Añadir variabilidad única basada en características del producto
+    final uniqueHash =
+        product.family.hashCode ^
+        product.fabric.hashCode ^
+        product.colorName.hashCode ^
+        product.archetype.hashCode;
+    final randomSeed = ((uniqueHash.abs() % 1000) / 1000.0);
+    final uniqueMultiplier = 0.92 + (randomSeed * 0.16); // 0.92 a 1.08
+    combinedEstimate *= uniqueMultiplier;
+
+    // 7. Ajustar por factores del producto
+    // Precio: productos más baratos tienden a vender más
+    final priceAdjust = product.price > 0
+        ? (1.0 + ((50.0 - product.price) / 100.0)).clamp(0.7, 1.4)
+        : 1.0;
+    combinedEstimate *= priceAdjust;
+
+    // Tiendas: más tiendas = más ventas
+    final storesAdjust = (product.numStores / 150.0).clamp(0.75, 1.35);
+    combinedEstimate *= storesAdjust;
+
+    // Tallas: más opciones = más ventas
+    final sizesAdjust = (product.numSizes / 5.0).clamp(0.85, 1.2);
+    combinedEstimate *= sizesAdjust;
+
+    // 8. Limitar al rango realista
+    return combinedEstimate.clamp(500.0, 9500.0);
+  }
+
+  List<MonthlyPrediction> _applyTagSeasonality(
+    List<MonthlyPrediction> predictions,
+    List<String> tags,
+    ProductData product,
+  ) {
+    if (predictions.isEmpty) {
+      return predictions;
+    }
+
+    final lowerTags = tags.map((t) => t.toLowerCase()).toList();
+    bool tagContains(List<String> keywords) {
+      return lowerTags.any(
+        (tag) => keywords.any((keyword) => tag.contains(keyword)),
+      );
+    }
+
+    final isWinter =
+        tagContains(['invierno', 'winter', 'abrigo', 'coat']) ||
+        product.fabric.toLowerCase().contains('wool');
+    final isSummer =
+        tagContains(['verano', 'summer', 'short', 'beach']) ||
+        product.lengthType.toLowerCase().contains('short');
+    final isSporty = tagContains(['sport', 'deportivo', 'active']);
+    final isPremium = tagContains(['premium', 'lujo', 'formal']);
+    final isParty =
+        tagContains(['party', 'fiesta', 'noche']) ||
+        product.category == 'Party';
+
+    return predictions.asMap().entries.map((entry) {
+      final monthNumber = entry.value.month.month;
+      double multiplier = 1.0;
+
+      if (isWinter) {
+        if (monthNumber >= 11 || monthNumber <= 2) {
+          multiplier = 1.4;
+        } else if (monthNumber >= 6 && monthNumber <= 8) {
+          multiplier = 0.5;
+        }
+      } else if (isSummer) {
+        if (monthNumber >= 5 && monthNumber <= 8) {
+          multiplier = 1.5;
+        } else if (monthNumber >= 12 || monthNumber <= 2) {
+          multiplier = 0.4;
+        }
+      } else {
+        if ((monthNumber >= 3 && monthNumber <= 5) ||
+            (monthNumber >= 9 && monthNumber <= 10)) {
+          multiplier = 1.15;
+        }
+      }
+
+      if (isSporty) multiplier *= 1.05;
+      if (isPremium) multiplier *= 0.9;
+      if (isParty && (monthNumber >= 11 || monthNumber <= 1)) {
+        multiplier *= 1.2;
+      }
+
+      final priceFactor = product.price <= 0
+          ? 1.0
+          : (40.0 / product.price).clamp(0.7, 1.5).toDouble();
+      final storesFactor = (product.numStores / 150).clamp(0.7, 1.6).toDouble();
+      final noise = 0.9 + ((entry.key % 4) * 0.035);
+
+      final adjustedWeekly =
+          (entry.value.weeklyDemand *
+                  multiplier *
+                  priceFactor *
+                  storesFactor *
+                  noise)
+              .clamp(350.0, entry.value.weeklyDemand * 1.9 + 1200);
+      final adjustedMonthly = adjustedWeekly * 4.33;
+
+      return MonthlyPrediction(
+        month: entry.value.month,
+        weeklyDemand: adjustedWeekly,
+        monthlyDemand: adjustedMonthly,
+      );
+    }).toList();
+  }
+
+  String _getCurrentSeason() {
+    final month = DateTime.now().month;
+    if (month >= 12 || month <= 2) return 'Invierno';
+    if (month >= 3 && month <= 5) return 'Primavera';
+    if (month >= 6 && month <= 8) return 'Verano';
+    return 'Otoño';
   }
 
   /// Retorna los colores del gradiente según el nivel de demanda
