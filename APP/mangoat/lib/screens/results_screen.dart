@@ -4,6 +4,7 @@ import 'package:flutter_spinkit/flutter_spinkit.dart';
 import 'package:mangoat/services/gemini_service.dart';
 import 'package:mangoat/services/prediction_service.dart';
 import 'package:mangoat/models/product_data.dart';
+import 'package:fl_chart/fl_chart.dart';
 
 class ResultsScreen extends StatefulWidget {
   final File imageFile;
@@ -21,6 +22,8 @@ class _ResultsScreenState extends State<ResultsScreen> {
   List<String> _tags = [];
   ProductData? _productData;
   PredictionResult? _prediction;
+  List<MonthlyPrediction> _monthlyPredictions = [];
+  List<double> _aiPredictions = [];
   bool _isLoading = true;
   String? _error;
 
@@ -53,10 +56,22 @@ class _ResultsScreenState extends State<ResultsScreen> {
         productData,
       );
 
+      // Obtener predicciones de 12 meses (modelo KNN)
+      final monthlyPredictions = await _predictionService.predict12Months(
+        productData,
+      );
+
+      // Obtener predicciones de IA (LLM con estacionalidad)
+      final aiPredictions = await _geminiService.predictMonthlyDemandWithAI(
+        productData,
+      );
+
       setState(() {
         _tags = results[0] as List<String>;
         _productData = productData;
         _prediction = prediction;
+        _monthlyPredictions = monthlyPredictions;
+        _aiPredictions = aiPredictions;
         _isLoading = false;
       });
     } catch (e) {
@@ -391,6 +406,448 @@ class _ResultsScreenState extends State<ResultsScreen> {
                       const SizedBox(height: 30),
                     ],
 
+                    // SECCIÓN 1.5: GRÁFICO DE PREDICCIÓN 12 MESES
+                    if (_monthlyPredictions.isNotEmpty) ...[
+                      const Text(
+                        '📈 Predicción 12 Meses',
+                        style: TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.orange,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      const Text(
+                        'Comparación: Modelo KNN vs AI Estacional',
+                        style: TextStyle(fontSize: 14, color: Colors.grey),
+                      ),
+                      const SizedBox(height: 20),
+
+                      // Leyenda
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 6,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.deepOrange.shade50,
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                color: Colors.deepOrange,
+                                width: 2,
+                              ),
+                            ),
+                            child: Row(
+                              children: [
+                                Container(
+                                  width: 20,
+                                  height: 3,
+                                  color: Colors.deepOrange,
+                                ),
+                                const SizedBox(width: 8),
+                                const Text(
+                                  'Model Generated',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.deepOrange,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 16),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 6,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.blue.shade50,
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(color: Colors.blue, width: 2),
+                            ),
+                            child: Row(
+                              children: [
+                                Container(
+                                  width: 20,
+                                  height: 3,
+                                  decoration: BoxDecoration(
+                                    color: Colors.blue,
+                                    borderRadius: BorderRadius.circular(2),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                const Text(
+                                  'AI Generated',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.blue,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 20),
+
+                      Card(
+                        elevation: 5,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Container(
+                          padding: const EdgeInsets.all(20),
+                          height: 300,
+                          child: LineChart(
+                            LineChartData(
+                              gridData: FlGridData(
+                                show: true,
+                                drawVerticalLine: false,
+                                horizontalInterval: 5000,
+                                getDrawingHorizontalLine: (value) {
+                                  return FlLine(
+                                    color: Colors.grey.shade300,
+                                    strokeWidth: 1,
+                                  );
+                                },
+                              ),
+                              titlesData: FlTitlesData(
+                                show: true,
+                                bottomTitles: AxisTitles(
+                                  sideTitles: SideTitles(
+                                    showTitles: true,
+                                    reservedSize: 30,
+                                    interval: 1,
+                                    getTitlesWidget: (value, meta) {
+                                      if (value.toInt() >= 0 &&
+                                          value.toInt() <
+                                              _monthlyPredictions.length) {
+                                        return Padding(
+                                          padding: const EdgeInsets.only(
+                                            top: 8.0,
+                                          ),
+                                          child: Text(
+                                            _monthlyPredictions[value.toInt()]
+                                                .monthName,
+                                            style: const TextStyle(
+                                              fontSize: 10,
+                                              fontWeight: FontWeight.bold,
+                                              color: Colors.grey,
+                                            ),
+                                          ),
+                                        );
+                                      }
+                                      return const Text('');
+                                    },
+                                  ),
+                                ),
+                                leftTitles: AxisTitles(
+                                  sideTitles: SideTitles(
+                                    showTitles: true,
+                                    reservedSize: 50,
+                                    interval: 5000,
+                                    getTitlesWidget: (value, meta) {
+                                      return Text(
+                                        '${(value / 1000).toStringAsFixed(0)}k',
+                                        style: const TextStyle(
+                                          fontSize: 10,
+                                          color: Colors.grey,
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ),
+                                topTitles: const AxisTitles(
+                                  sideTitles: SideTitles(showTitles: false),
+                                ),
+                                rightTitles: const AxisTitles(
+                                  sideTitles: SideTitles(showTitles: false),
+                                ),
+                              ),
+                              borderData: FlBorderData(
+                                show: true,
+                                border: Border.all(
+                                  color: Colors.grey.shade300,
+                                  width: 1,
+                                ),
+                              ),
+                              minX: 0,
+                              maxX: (_monthlyPredictions.length - 1).toDouble(),
+                              minY: 0,
+                              maxY: () {
+                                final knnMax = _monthlyPredictions
+                                    .map((e) => e.weeklyDemand)
+                                    .reduce((a, b) => a > b ? a : b);
+                                final aiMax = _aiPredictions.isNotEmpty
+                                    ? _aiPredictions.reduce(
+                                        (a, b) => a > b ? a : b,
+                                      )
+                                    : 0.0;
+                                return (knnMax > aiMax ? knnMax : aiMax) * 1.2;
+                              }(),
+                              lineBarsData: [
+                                // Línea del modelo KNN (naranja, sólida)
+                                LineChartBarData(
+                                  spots: _monthlyPredictions
+                                      .asMap()
+                                      .entries
+                                      .map((entry) {
+                                        return FlSpot(
+                                          entry.key.toDouble(),
+                                          entry.value.weeklyDemand,
+                                        );
+                                      })
+                                      .toList(),
+                                  isCurved: true,
+                                  gradient: LinearGradient(
+                                    colors: [
+                                      Colors.orange.shade400,
+                                      Colors.deepOrange.shade600,
+                                    ],
+                                  ),
+                                  barWidth: 4,
+                                  isStrokeCapRound: true,
+                                  dotData: FlDotData(
+                                    show: true,
+                                    getDotPainter:
+                                        (spot, percent, barData, index) {
+                                          return FlDotCirclePainter(
+                                            radius: 6,
+                                            color: Colors.white,
+                                            strokeWidth: 3,
+                                            strokeColor: Colors.deepOrange,
+                                          );
+                                        },
+                                  ),
+                                  belowBarData: BarAreaData(
+                                    show: true,
+                                    gradient: LinearGradient(
+                                      colors: [
+                                        Colors.orange.shade200.withOpacity(0.2),
+                                        Colors.orange.shade100.withOpacity(
+                                          0.05,
+                                        ),
+                                      ],
+                                      begin: Alignment.topCenter,
+                                      end: Alignment.bottomCenter,
+                                    ),
+                                  ),
+                                ),
+                                // Línea de la IA (azul, más transparente)
+                                if (_aiPredictions.isNotEmpty)
+                                  LineChartBarData(
+                                    spots: _aiPredictions.asMap().entries.map((
+                                      entry,
+                                    ) {
+                                      return FlSpot(
+                                        entry.key.toDouble(),
+                                        entry.value,
+                                      );
+                                    }).toList(),
+                                    isCurved: true,
+                                    gradient: LinearGradient(
+                                      colors: [
+                                        Colors.blue.shade300,
+                                        Colors.blue.shade500,
+                                      ],
+                                    ),
+                                    barWidth: 3,
+                                    isStrokeCapRound: true,
+                                    dotData: FlDotData(
+                                      show: true,
+                                      getDotPainter:
+                                          (spot, percent, barData, index) {
+                                            return FlDotCirclePainter(
+                                              radius: 4,
+                                              color: Colors.white,
+                                              strokeWidth: 2,
+                                              strokeColor: Colors.blue,
+                                            );
+                                          },
+                                    ),
+                                    belowBarData: BarAreaData(
+                                      show: true,
+                                      gradient: LinearGradient(
+                                        colors: [
+                                          Colors.blue.shade200.withOpacity(
+                                            0.15,
+                                          ),
+                                          Colors.blue.shade100.withOpacity(
+                                            0.03,
+                                          ),
+                                        ],
+                                        begin: Alignment.topCenter,
+                                        end: Alignment.bottomCenter,
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                              lineTouchData: LineTouchData(
+                                enabled: true,
+                                touchTooltipData: LineTouchTooltipData(
+                                  getTooltipItems: (touchedSpots) {
+                                    return touchedSpots.map((spot) {
+                                      final month =
+                                          _monthlyPredictions[spot.x.toInt()];
+                                      final isKnn = spot.barIndex == 0;
+                                      return LineTooltipItem(
+                                        '${month.monthName} - ${isKnn ? "KNN" : "AI"}\\n${spot.y.toInt()} un/sem',
+                                        TextStyle(
+                                          color: Colors.white,
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 11,
+                                          backgroundColor: isKnn
+                                              ? Colors.deepOrange.withOpacity(
+                                                  0.9,
+                                                )
+                                              : Colors.blue.withOpacity(0.9),
+                                        ),
+                                      );
+                                    }).toList();
+                                  },
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+
+                      // Estadísticas comparativas
+                      const Text(
+                        'Estadísticas Comparativas',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.grey,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          // KNN Model Stats
+                          Expanded(
+                            child: Card(
+                              elevation: 2,
+                              color: Colors.deepOrange.shade50,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Padding(
+                                padding: const EdgeInsets.all(16),
+                                child: Column(
+                                  children: [
+                                    Row(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.center,
+                                      children: [
+                                        Icon(
+                                          Icons.analytics,
+                                          color: Colors.deepOrange.shade600,
+                                          size: 20,
+                                        ),
+                                        const SizedBox(width: 8),
+                                        const Text(
+                                          'Comparison Model',
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.bold,
+                                            color: Colors.deepOrange,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const Divider(height: 20),
+                                    _buildStatRow(
+                                      'Promedio',
+                                      '${(_monthlyPredictions.map((e) => e.weeklyDemand).reduce((a, b) => a + b) / _monthlyPredictions.length).toInt()}',
+                                      Colors.deepOrange,
+                                    ),
+                                    const SizedBox(height: 8),
+                                    _buildStatRow(
+                                      'Máximo',
+                                      '${_monthlyPredictions.map((e) => e.weeklyDemand).reduce((a, b) => a > b ? a : b).toInt()}',
+                                      Colors.green,
+                                    ),
+                                    const SizedBox(height: 8),
+                                    _buildStatRow(
+                                      'Mínimo',
+                                      '${_monthlyPredictions.map((e) => e.weeklyDemand).reduce((a, b) => a < b ? a : b).toInt()}',
+                                      Colors.blue,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          // AI Stats
+                          if (_aiPredictions.isNotEmpty)
+                            Expanded(
+                              child: Card(
+                                elevation: 2,
+                                color: Colors.blue.shade50,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(16),
+                                  child: Column(
+                                    children: [
+                                      Row(
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.center,
+                                        children: [
+                                          Icon(
+                                            Icons.psychology,
+                                            color: Colors.blue.shade600,
+                                            size: 20,
+                                          ),
+                                          const SizedBox(width: 8),
+                                          const Text(
+                                            'AI Seasonal',
+                                            style: TextStyle(
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.bold,
+                                              color: Colors.blue,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const Divider(height: 20),
+                                      _buildStatRow(
+                                        'Promedio',
+                                        '${(_aiPredictions.reduce((a, b) => a + b) / _aiPredictions.length).toInt()}',
+                                        Colors.blue,
+                                      ),
+                                      const SizedBox(height: 8),
+                                      _buildStatRow(
+                                        'Máximo',
+                                        '${_aiPredictions.reduce((a, b) => a > b ? a : b).toInt()}',
+                                        Colors.green,
+                                      ),
+                                      const SizedBox(height: 8),
+                                      _buildStatRow(
+                                        'Mínimo',
+                                        '${_aiPredictions.reduce((a, b) => a < b ? a : b).toInt()}',
+                                        Colors.blue,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 30),
+                    ],
+
                     // SECCIÓN 2: ETIQUETAS EXTRAÍDAS POR LA IA
                     const Text(
                       '🏷️ Etiquetas Detectadas',
@@ -630,6 +1087,24 @@ class _ResultsScreenState extends State<ResultsScreen> {
           ],
         ),
       ),
+    );
+  }
+
+  /// Widget auxiliar para mostrar una fila de estadística
+  Widget _buildStatRow(String label, String value, Color color) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(label, style: const TextStyle(fontSize: 11, color: Colors.grey)),
+        Text(
+          value,
+          style: TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.bold,
+            color: color,
+          ),
+        ),
+      ],
     );
   }
 }

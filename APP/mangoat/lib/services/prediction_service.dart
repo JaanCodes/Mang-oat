@@ -417,6 +417,93 @@ class PredictionService {
 
     return factors;
   }
+
+  /// Predice la demanda para los próximos 12 meses
+  Future<List<MonthlyPrediction>> predict12Months(ProductData product) async {
+    if (!_isInitialized) {
+      await initialize();
+    }
+
+    final predictions = <MonthlyPrediction>[];
+    final now = DateTime.now();
+
+    for (int i = 1; i <= 12; i++) {
+      final targetMonth = DateTime(now.year, now.month + i, 1);
+
+      // Crear una copia del producto con la fecha futura
+      final futureProduct = ProductData(
+        lifeCycleLength: product.lifeCycleLength,
+        numStores: product.numStores,
+        numSizes: product.numSizes,
+        hasPlusSizes: product.hasPlusSizes,
+        price: product.price,
+        idSeason: product.idSeason,
+        aggregatedFamily: product.aggregatedFamily,
+        family: product.family,
+        category: product.category,
+        fabric: product.fabric,
+        colorName: product.colorName,
+        lengthType: product.lengthType,
+        silhouetteType: product.silhouetteType,
+        waistType: product.waistType,
+        neckLapelType: product.neckLapelType,
+        sleeveLengthType: product.sleeveLengthType,
+        heelShapeType: product.heelShapeType,
+        toecapType: product.toecapType,
+        wovenStructure: product.wovenStructure,
+        knitStructure: product.knitStructure,
+        printType: product.printType,
+        archetype: product.archetype,
+        moment: product.moment,
+        phaseIn: targetMonth,
+        imageEmbedding: product.imageEmbedding,
+      );
+
+      final demand = await predictDemand(futureProduct);
+      final weeklyDemand = demand / 4.33; // Convertir a semanal aproximado
+
+      predictions.add(
+        MonthlyPrediction(
+          month: targetMonth,
+          weeklyDemand: weeklyDemand,
+          monthlyDemand: demand,
+        ),
+      );
+    }
+
+    return predictions;
+  }
+}
+
+/// Predicción mensual
+class MonthlyPrediction {
+  final DateTime month;
+  final double weeklyDemand;
+  final double monthlyDemand;
+
+  MonthlyPrediction({
+    required this.month,
+    required this.weeklyDemand,
+    required this.monthlyDemand,
+  });
+
+  String get monthName {
+    const months = [
+      'Ene',
+      'Feb',
+      'Mar',
+      'Abr',
+      'May',
+      'Jun',
+      'Jul',
+      'Ago',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dic',
+    ];
+    return months[month.month - 1];
+  }
 }
 
 /// Resultado de una predicción con detalles adicionales
