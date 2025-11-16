@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
+import 'package:mangoat/models/product_data.dart';
 
 class GeminiService {
   static const String _apiKey = '65cdb83d-db28-42be-8b7c-03d63132c62d';
@@ -36,19 +37,14 @@ Ejemplo: camiseta, azul, algodón, casual, manga corta, verano, lisa
           {
             'role': 'user',
             'content': [
-              {
-                'type': 'text',
-                'text': prompt,
-              },
+              {'type': 'text', 'text': prompt},
               {
                 'type': 'image_url',
-                'image_url': {
-                  'url': 'data:image/jpeg;base64,$base64Image',
-                }
-              }
-            ]
-          }
-        ]
+                'image_url': {'url': 'data:image/jpeg;base64,$base64Image'},
+              },
+            ],
+          },
+        ],
       };
 
       // Realizar la solicitud
@@ -63,10 +59,10 @@ Ejemplo: camiseta, azul, algodón, casual, manga corta, verano, lisa
 
       if (response.statusCode == 200) {
         final jsonResponse = jsonDecode(response.body);
-        
+
         // Extraer el texto de la respuesta
         final text = jsonResponse['choices'][0]['message']['content'] as String;
-        
+
         // Procesar el texto para obtener los tags
         final tags = text
             .trim()
@@ -77,7 +73,9 @@ Ejemplo: camiseta, azul, algodón, casual, manga corta, verano, lisa
 
         return tags;
       } else {
-        throw Exception('Error en la API: ${response.statusCode} - ${response.body}');
+        throw Exception(
+          'Error en la API: ${response.statusCode} - ${response.body}',
+        );
       }
     } catch (e) {
       throw Exception('Error al analizar la imagen: $e');
@@ -101,19 +99,14 @@ Incluye información sobre el estilo, cómo combinarla y para qué ocasiones es 
           {
             'role': 'user',
             'content': [
-              {
-                'type': 'text',
-                'text': prompt,
-              },
+              {'type': 'text', 'text': prompt},
               {
                 'type': 'image_url',
-                'image_url': {
-                  'url': 'data:image/jpeg;base64,$base64Image',
-                }
-              }
-            ]
-          }
-        ]
+                'image_url': {'url': 'data:image/jpeg;base64,$base64Image'},
+              },
+            ],
+          },
+        ],
       };
 
       final response = await http.post(
@@ -134,5 +127,173 @@ Incluye información sobre el estilo, cómo combinarla y para qué ocasiones es 
     } catch (e) {
       throw Exception('Error al obtener descripción: $e');
     }
+  }
+
+  /// Extrae información estructurada del producto para el modelo de predicción
+  Future<ProductData> extractProductData(File imageFile) async {
+    try {
+      final bytes = await imageFile.readAsBytes();
+      final base64Image = base64Encode(bytes);
+
+      final prompt = '''
+Analiza esta imagen de ropa detenidamente y extrae la siguiente información en formato JSON.
+Sé lo más específico y preciso posible:
+
+{
+  "aggregated_family": "Woman" o "Man" o "Kids" (determina para quién es la prenda),
+  "family": "Dresses" o "Shirts" o "Pants" o "Skirts" o "Jackets" o "Coats" o "Sweaters" o "T-Shirts" o "Jeans" o "Shoes" o "Bags" o "Accessories",
+  "category": "Casual" o "Formal" o "Sport" o "Party" o "Beach" o "Work",
+  "fabric": "Cotton" o "Polyester" o "Silk" o "Denim" o "Leather" o "Wool" o "Linen" o "Viscose" (estima el material),
+  "color_name": color principal visible (ej: "Blue", "Black", "Red", "White", etc),
+  "length_type": "Short" o "Mid" o "Long" o "Maxi" (para prendas con largo definido),
+  "sleeve_length_type": "Sleeveless" o "Short" o "3/4" o "Long" (para prendas con mangas),
+  "silhouette_type": "Straight" o "Fitted" o "Loose" o "A-line" o "Oversized",
+  "waist_type": "High" o "Mid" o "Low" o "Natural" (para pantalones/faldas),
+  "neck_lapel_type": "Round" o "V-neck" o "Crew" o "Turtleneck" o "Collar" o "Hooded",
+  "heel_shape_type": "Flat" o "Low" o "Mid" o "High" o "Platform" (solo para zapatos),
+  "toecap_type": "Round" o "Pointed" o "Square" o "Open" (solo para zapatos),
+  "woven_structure": "Plain" o "Twill" o "Satin" o "None",
+  "knit_structure": "Jersey" o "Rib" o "Cable" o "None",
+  "print_type": "Solid" o "Striped" o "Floral" o "Abstract" o "Geometric" o "Animal" o "Text",
+  "archetype": "Classic" o "Trendy" o "Romantic" o "Sporty" o "Edgy" o "Minimalist",
+  "moment": "Day" o "Night" o "Weekend" o "Work" o "Special",
+  "estimated_price": precio estimado en dólares USD (20-150 típicamente),
+  "estimated_stores": número estimado de tiendas donde se vendería (50-300),
+  "estimated_sizes": número de tallas disponibles (3-8),
+  "has_plus_sizes": 1 si probablemente tiene tallas grandes, 0 si no,
+  "estimated_lifecycle": duración estimada en el catálogo en semanas (8-24)
+}
+
+IMPORTANTE: Responde ÚNICAMENTE con el objeto JSON válido, sin markdown, sin explicaciones.
+''';
+
+      final requestBody = {
+        'stream': false,
+        'model': _model,
+        'messages': [
+          {
+            'role': 'user',
+            'content': [
+              {'type': 'text', 'text': prompt},
+              {
+                'type': 'image_url',
+                'image_url': {'url': 'data:image/jpeg;base64,$base64Image'},
+              },
+            ],
+          },
+        ],
+      };
+
+      final response = await http.post(
+        Uri.parse(_baseUrl),
+        headers: {
+          'Authorization': 'Bearer $_apiKey',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode(requestBody),
+      );
+
+      if (response.statusCode == 200) {
+        final jsonResponse = jsonDecode(response.body);
+        final text = jsonResponse['choices'][0]['message']['content'] as String;
+
+        // Intentar parsear el JSON de la respuesta
+        try {
+          // Limpiar el texto para obtener solo el JSON
+          String cleanedJson = text.trim();
+          if (cleanedJson.startsWith('```json')) {
+            cleanedJson = cleanedJson.substring(7);
+          }
+          if (cleanedJson.startsWith('```')) {
+            cleanedJson = cleanedJson.substring(3);
+          }
+          if (cleanedJson.endsWith('```')) {
+            cleanedJson = cleanedJson.substring(0, cleanedJson.length - 3);
+          }
+          cleanedJson = cleanedJson.trim();
+
+          final productJson = jsonDecode(cleanedJson);
+
+          // Determinar la temporada actual para el season code
+          final now = DateTime.now();
+          final month = now.month;
+          int seasonCode;
+          if (month >= 12 || month <= 2) {
+            seasonCode = now.year * 100 + 1; // Winter
+          } else if (month >= 3 && month <= 5) {
+            seasonCode = now.year * 100 + 2; // Spring
+          } else if (month >= 6 && month <= 8) {
+            seasonCode = now.year * 100 + 3; // Summer
+          } else {
+            seasonCode = now.year * 100 + 4; // Autumn
+          }
+
+          // Crear ProductData con los valores extraídos por la IA
+          return ProductData(
+            lifeCycleLength:
+                (productJson['estimated_lifecycle'] as num?)?.toDouble() ??
+                12.0,
+            numStores:
+                (productJson['estimated_stores'] as num?)?.toDouble() ?? 150.0,
+            numSizes:
+                (productJson['estimated_sizes'] as num?)?.toDouble() ?? 5.0,
+            hasPlusSizes:
+                (productJson['has_plus_sizes'] as num?)?.toDouble() ?? 1.0,
+            price:
+                (productJson['estimated_price'] as num?)?.toDouble() ?? 29.99,
+            idSeason: seasonCode,
+            aggregatedFamily:
+                productJson['aggregated_family'] as String? ?? 'Woman',
+            family: productJson['family'] as String? ?? 'Unknown',
+            category: productJson['category'] as String? ?? 'Casual',
+            fabric: productJson['fabric'] as String? ?? 'Cotton',
+            colorName: productJson['color_name'] as String? ?? 'Unknown',
+            lengthType: productJson['length_type'] as String? ?? 'Mid',
+            silhouetteType:
+                productJson['silhouette_type'] as String? ?? 'Straight',
+            waistType: productJson['waist_type'] as String? ?? 'Natural',
+            neckLapelType: productJson['neck_lapel_type'] as String? ?? 'Round',
+            sleeveLengthType:
+                productJson['sleeve_length_type'] as String? ?? 'Short',
+            heelShapeType: productJson['heel_shape_type'] as String? ?? 'Flat',
+            toecapType: productJson['toecap_type'] as String? ?? 'Round',
+            wovenStructure:
+                productJson['woven_structure'] as String? ?? 'Plain',
+            knitStructure: productJson['knit_structure'] as String? ?? 'Jersey',
+            printType: productJson['print_type'] as String? ?? 'Solid',
+            archetype: productJson['archetype'] as String? ?? 'Classic',
+            moment: productJson['moment'] as String? ?? 'Day',
+            phaseIn: DateTime.now(),
+            imageEmbedding: _generateSyntheticEmbedding(productJson),
+          );
+        } catch (e) {
+          // Si falla el parseo, usar valores por defecto
+          print('Error al parsear JSON del producto: $e');
+          return ProductData.example();
+        }
+      } else {
+        throw Exception('Error en la API: ${response.statusCode}');
+      }
+    } catch (e) {
+      print('Error al extraer datos del producto: $e');
+      // Retornar datos de ejemplo en caso de error
+      return ProductData.example();
+    }
+  }
+
+  /// Genera un embedding sintético basado en las características del producto
+  /// Esto simula el vector de imagen que normalmente vendría de una red neuronal
+  List<double> _generateSyntheticEmbedding(Map<String, dynamic> productJson) {
+    final random =
+        productJson.hashCode; // Usar hash como seed para consistencia
+    final embedding = List<double>.filled(256, 0.0);
+
+    // Generar valores pseudo-aleatorios basados en las características
+    for (int i = 0; i < 256; i++) {
+      embedding[i] =
+          ((random + i * 17) % 100) / 100.0 - 0.5; // Valores entre -0.5 y 0.5
+    }
+
+    return embedding;
   }
 }

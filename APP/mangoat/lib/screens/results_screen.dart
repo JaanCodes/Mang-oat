@@ -2,6 +2,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_spinkit/flutter_spinkit.dart';
 import 'package:mangoat/services/gemini_service.dart';
+import 'package:mangoat/services/prediction_service.dart';
+import 'package:mangoat/models/product_data.dart';
 
 class ResultsScreen extends StatefulWidget {
   final File imageFile;
@@ -14,8 +16,11 @@ class ResultsScreen extends StatefulWidget {
 
 class _ResultsScreenState extends State<ResultsScreen> {
   final GeminiService _geminiService = GeminiService();
+  final PredictionService _predictionService = PredictionService();
+
   List<String> _tags = [];
-  String _description = '';
+  ProductData? _productData;
+  PredictionResult? _prediction;
   bool _isLoading = true;
   String? _error;
 
@@ -32,15 +37,26 @@ class _ResultsScreenState extends State<ResultsScreen> {
         _error = null;
       });
 
-      // Obtener tags y descripción en paralelo
+      // Inicializar el servicio de predicción
+      await _predictionService.initialize();
+
+      // Obtener tags, descripción y datos del producto en paralelo
       final results = await Future.wait([
         _geminiService.analyzeClothing(widget.imageFile),
-        _geminiService.getDetailedDescription(widget.imageFile),
+        _geminiService.extractProductData(widget.imageFile),
       ]);
+
+      final productData = results[1] as ProductData;
+
+      // Hacer la predicción de demanda
+      final prediction = await _predictionService.predictWithDetails(
+        productData,
+      );
 
       setState(() {
         _tags = results[0] as List<String>;
-        _description = results[1] as String;
+        _productData = productData;
+        _prediction = prediction;
         _isLoading = false;
       });
     } catch (e) {
@@ -49,6 +65,121 @@ class _ResultsScreenState extends State<ResultsScreen> {
         _isLoading = false;
       });
     }
+  }
+
+  /// Retorna los colores del gradiente según el nivel de demanda
+  List<Color> _getPredictionColors(String demandLevel) {
+    switch (demandLevel) {
+      case 'Baja':
+        return [Colors.red.shade400, Colors.red.shade600];
+      case 'Media':
+        return [Colors.orange.shade400, Colors.deepOrange.shade500];
+      case 'Alta':
+        return [Colors.green.shade400, Colors.green.shade600];
+      case 'Muy Alta':
+        return [Colors.blue.shade400, Colors.indigo.shade600];
+      default:
+        return [Colors.grey.shade400, Colors.grey.shade600];
+    }
+  }
+
+  /// Retorna el icono apropiado según el nivel de demanda
+  IconData _getDemandIcon(String demandLevel) {
+    switch (demandLevel) {
+      case 'Baja':
+        return Icons.trending_down;
+      case 'Media':
+        return Icons.trending_flat;
+      case 'Alta':
+        return Icons.trending_up;
+      case 'Muy Alta':
+        return Icons.rocket_launch;
+      default:
+        return Icons.help_outline;
+    }
+  }
+
+  /// Retorna el color del icono según el nivel de demanda
+  Color _getDemandIconColor(String demandLevel) {
+    switch (demandLevel) {
+      case 'Baja':
+        return Colors.red.shade700;
+      case 'Media':
+        return Colors.orange.shade700;
+      case 'Alta':
+        return Colors.green.shade700;
+      case 'Muy Alta':
+        return Colors.blue.shade700;
+      default:
+        return Colors.grey.shade700;
+    }
+  }
+
+  /// Construye una tarjeta de información con título y pares clave-valor
+  Widget _buildInfoCard(
+    String title,
+    IconData icon,
+    Color color,
+    Map<String, String> data,
+  ) {
+    return Card(
+      elevation: 3,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: color.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(icon, color: color, size: 24),
+                ),
+                const SizedBox(width: 12),
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 15),
+            ...data.entries.map((entry) {
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      entry.key,
+                      style: const TextStyle(fontSize: 14, color: Colors.grey),
+                    ),
+                    const SizedBox(width: 10),
+                    Flexible(
+                      child: Text(
+                        entry.value,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                        ),
+                        textAlign: TextAlign.right,
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }).toList(),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -84,10 +215,7 @@ class _ResultsScreenState extends State<ResultsScreen> {
                     ),
                   ],
                 ),
-                child: Image.file(
-                  widget.imageFile,
-                  fit: BoxFit.contain,
-                ),
+                child: Image.file(widget.imageFile, fit: BoxFit.contain),
               ),
             ),
 
@@ -97,17 +225,11 @@ class _ResultsScreenState extends State<ResultsScreen> {
                 child: const Center(
                   child: Column(
                     children: [
-                      SpinKitFadingCircle(
-                        color: Colors.orange,
-                        size: 60,
-                      ),
+                      SpinKitFadingCircle(color: Colors.orange, size: 60),
                       SizedBox(height: 20),
                       Text(
                         'Analizando tu prenda con IA...',
-                        style: TextStyle(
-                          fontSize: 16,
-                          color: Colors.grey,
-                        ),
+                        style: TextStyle(fontSize: 16, color: Colors.grey),
                       ),
                     ],
                   ),
@@ -154,85 +276,328 @@ class _ResultsScreenState extends State<ResultsScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Tags
-                    const Text(
-                      'Tags',
-                      style: TextStyle(
-                        fontSize: 24,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.orange,
+                    // SECCIÓN 1: PREDICCIÓN DE DEMANDA (LO MÁS IMPORTANTE)
+                    if (_prediction != null) ...[
+                      const Text(
+                        '📊 Predicción de Producción',
+                        style: TextStyle(
+                          fontSize: 28,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.orange,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 15),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: _tags.map((tag) {
-                        return Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 10,
-                          ),
+                      const SizedBox(height: 15),
+                      Card(
+                        elevation: 8,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Container(
                           decoration: BoxDecoration(
                             gradient: LinearGradient(
-                              colors: [
-                                Colors.orange.shade400,
-                                Colors.deepOrange.shade500,
-                              ],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                              colors: _getPredictionColors(
+                                _prediction!.demandLevel,
+                              ),
                             ),
-                            borderRadius: BorderRadius.circular(25),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.orange.withOpacity(0.3),
-                                blurRadius: 5,
-                                offset: const Offset(0, 3),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          padding: const EdgeInsets.all(25),
+                          child: Column(
+                            children: [
+                              const Text(
+                                'DEMANDA SEMANAL ESTIMADA',
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  color: Colors.white70,
+                                  fontWeight: FontWeight.w600,
+                                  letterSpacing: 1.5,
+                                ),
+                              ),
+                              const SizedBox(height: 15),
+                              Text(
+                                '${_prediction!.predictedDemand.toStringAsFixed(0)}',
+                                style: const TextStyle(
+                                  fontSize: 48,
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              const Text(
+                                'unidades / semana',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  color: Colors.white70,
+                                ),
+                              ),
+                              const SizedBox(height: 20),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 20,
+                                  vertical: 10,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: BorderRadius.circular(25),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      _getDemandIcon(_prediction!.demandLevel),
+                                      color: _getDemandIconColor(
+                                        _prediction!.demandLevel,
+                                      ),
+                                      size: 24,
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Text(
+                                      'Nivel: ${_prediction!.demandLevel}',
+                                      style: TextStyle(
+                                        fontSize: 18,
+                                        color: _getDemandIconColor(
+                                          _prediction!.demandLevel,
+                                        ),
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(height: 20),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  const Icon(
+                                    Icons.verified,
+                                    color: Colors.white70,
+                                    size: 18,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    'Confianza: ${_prediction!.confidence.toInt()}%',
+                                    style: const TextStyle(
+                                      fontSize: 14,
+                                      color: Colors.white70,
+                                    ),
+                                  ),
+                                ],
                               ),
                             ],
                           ),
-                          child: Text(
-                            tag,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 14,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                        );
-                      }).toList(),
-                    ),
-                    
-                    const SizedBox(height: 30),
-                    
-                    // Descripción
+                        ),
+                      ),
+                      const SizedBox(height: 30),
+                    ],
+
+                    // SECCIÓN 2: ETIQUETAS EXTRAÍDAS POR LA IA
                     const Text(
-                      'Descripción',
+                      '🏷️ Etiquetas Detectadas',
                       style: TextStyle(
                         fontSize: 24,
                         fontWeight: FontWeight.bold,
                         color: Colors.orange,
                       ),
                     ),
+                    const SizedBox(height: 10),
+                    const Text(
+                      'Información extraída automáticamente de la imagen:',
+                      style: TextStyle(fontSize: 14, color: Colors.grey),
+                    ),
                     const SizedBox(height: 15),
-                    Card(
-                      elevation: 3,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(15),
+
+                    if (_productData != null) ...[
+                      _buildInfoCard(
+                        'Información General',
+                        Icons.info_outline,
+                        Colors.blue,
+                        {
+                          'Categoría': _productData!.aggregatedFamily,
+                          'Tipo': _productData!.family,
+                          'Estilo': _productData!.category,
+                          'Color': _productData!.colorName,
+                          'Momento': _productData!.moment,
+                          'Arquetipo': _productData!.archetype,
+                        },
                       ),
-                      child: Padding(
-                        padding: const EdgeInsets.all(20),
-                        child: Text(
-                          _description,
-                          style: const TextStyle(
-                            fontSize: 16,
-                            height: 1.6,
-                            color: Colors.black87,
+                      const SizedBox(height: 15),
+
+                      _buildInfoCard(
+                        'Características Físicas',
+                        Icons.checkroom,
+                        Colors.purple,
+                        {
+                          'Tejido': _productData!.fabric,
+                          'Largo': _productData!.lengthType,
+                          'Silueta': _productData!.silhouetteType,
+                          'Mangas': _productData!.sleeveLengthType,
+                          'Cuello': _productData!.neckLapelType,
+                          'Estampado': _productData!.printType,
+                        },
+                      ),
+                      const SizedBox(height: 15),
+
+                      _buildInfoCard(
+                        'Datos de Mercado',
+                        Icons.store,
+                        Colors.green,
+                        {
+                          'Precio Estimado':
+                              '\$${_productData!.price.toStringAsFixed(2)}',
+                          'Tiendas': '${_productData!.numStores.toInt()}',
+                          'Tallas': '${_productData!.numSizes.toInt()}',
+                          'Tallas Plus': _productData!.hasPlusSizes > 0
+                              ? 'Sí'
+                              : 'No',
+                          'Ciclo de Vida':
+                              '${_productData!.lifeCycleLength.toInt()} semanas',
+                          'Temporada': _prediction?.season ?? 'N/A',
+                        },
+                      ),
+                      const SizedBox(height: 30),
+                    ],
+
+                    // SECCIÓN 3: FACTORES CLAVE DE LA PREDICCIÓN
+                    if (_prediction != null) ...[
+                      const Text(
+                        '📈 Factores de la Predicción',
+                        style: TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.orange,
+                        ),
+                      ),
+                      const SizedBox(height: 15),
+                      Card(
+                        elevation: 3,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(15),
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.all(20),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Row(
+                                children: [
+                                  Icon(
+                                    Icons.analytics_outlined,
+                                    color: Colors.orange,
+                                  ),
+                                  SizedBox(width: 8),
+                                  Text(
+                                    'Análisis del Modelo',
+                                    style: TextStyle(
+                                      fontSize: 18,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 15),
+                              ..._prediction!.factors.entries.map((entry) {
+                                return Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 8,
+                                  ),
+                                  child: Row(
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Container(
+                                            width: 8,
+                                            height: 8,
+                                            decoration: const BoxDecoration(
+                                              color: Colors.orange,
+                                              shape: BoxShape.circle,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 10),
+                                          Text(
+                                            entry.key,
+                                            style: const TextStyle(
+                                              fontSize: 14,
+                                              fontWeight: FontWeight.w500,
+                                              color: Colors.grey,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(width: 10),
+                                      Flexible(
+                                        child: Text(
+                                          entry.value,
+                                          style: const TextStyle(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                          textAlign: TextAlign.right,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              }).toList(),
+                            ],
                           ),
                         ),
                       ),
-                    ),
-                    
-                    const SizedBox(height: 30),
-                    
+                      const SizedBox(height: 30),
+                    ],
+
+                    // SECCIÓN 4: TAGS DESCRIPTIVOS (OPCIONAL)
+                    if (_tags.isNotEmpty) ...[
+                      const Text(
+                        '🔖 Tags Descriptivos',
+                        style: TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.orange,
+                        ),
+                      ),
+                      const SizedBox(height: 15),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: _tags.map((tag) {
+                          return Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 10,
+                            ),
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                colors: [
+                                  Colors.orange.shade300,
+                                  Colors.deepOrange.shade400,
+                                ],
+                              ),
+                              borderRadius: BorderRadius.circular(25),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.orange.withOpacity(0.3),
+                                  blurRadius: 5,
+                                  offset: const Offset(0, 3),
+                                ),
+                              ],
+                            ),
+                            child: Text(
+                              tag,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                      const SizedBox(height: 30),
+                    ],
+
                     // Botón para analizar otra prenda
                     SizedBox(
                       width: double.infinity,
